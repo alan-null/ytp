@@ -5,6 +5,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>YT_DLP_Proxy</RootNamespace>
+    <AssemblyName>ytp</AssemblyName>
+    <Version>1.0.0</Version>
   </PropertyGroup>
 
 </Project>
