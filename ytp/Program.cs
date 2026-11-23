@@ -1,7 +1,6 @@
-using System.Diagnostics;
-using System.Collections.Concurrent;
+using Ytp;
+using Ytp.YtDlp;
 
-var cache = new ConcurrentDictionary<string, string>();
 // Resolve appsettings.json next to the binary, not the caller's working directory.
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -9,74 +8,47 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     ContentRootPath = AppContext.BaseDirectory
 });
 
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<YtDlpClient>();
+builder.Services.AddSingleton<StreamUrlResolver>();
+
 var app = builder.Build();
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
 
+// Log which yt-dlp binary and version are used.
+app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
+{
+    var ytDlp = app.Services.GetRequiredService<YtDlpClient>();
+    try
+    {
+        logger.LogInformation("Using yt-dlp {Path} ({Version})", ytDlp.ExecutablePath, await ytDlp.GetVersionAsync());
+    }
+    catch (YtDlpException e)
+    {
+        logger.LogError("yt-dlp is not usable: {Error}", e.Message);
+    }
+}));
+
 app.Urls.Add("http://*:497");
 
-app.MapGet("/bestAudio", async (string v) =>
+// Returns a direct googlevideo URL. A failed lookup is an error response, never a URL.
+app.MapGet("/bestAudio", async (string? v, StreamUrlResolver resolver, CancellationToken ct) =>
 {
-    if (string.IsNullOrEmpty(v))
+    if (!VideoId.IsValid(v))
     {
-        return Results.BadRequest("Parameter 'v' is required.");
+        return Results.BadRequest("Parameter 'v' must be an 11-character YouTube video ID.");
     }
 
-    logger.LogInformation($"Requested VideoId: {v}");
+    logger.LogInformation("Requested VideoId: {VideoId}", v);
 
-    if (cache.TryGetValue(v, out var cachedUrl))
+    try
     {
-        if (await IsUrlAccessible(cachedUrl))
-        {
-            return Results.Json(new { url = cachedUrl });
-        }
-        else
-        {
-            cache.TryRemove(v, out _);
-        }
+        return Results.Json(new { url = await resolver.ResolveAsync(v!, ct) });
     }
-
-    var url = $"https://www.youtube.com/watch?v={v}";
-    var startInfo = new ProcessStartInfo
+    catch (YtDlpException e)
     {
-        FileName = "yt-dlp",
-        Arguments = $"--get-url -f bestaudio {url}",
-        RedirectStandardOutput = true,
-        UseShellExecute = false,
-        CreateNoWindow = true
-    };
-
-    using (var process = Process.Start(startInfo))
-    {
-        if (process == null)
-        {
-            return Results.BadRequest("yt-dlp not found.");
-        }
-        using (var reader = process.StandardOutput)
-        {
-            string result = reader.ReadToEnd();
-            process.WaitForExit();
-
-            cache[v] = result.Trim();
-
-            return Results.Json(new { url = result.Trim() });
-        }
+        return Results.Problem(e.Message, statusCode: StatusCodes.Status502BadGateway);
     }
 });
 
 app.Run();
-
-async Task<bool> IsUrlAccessible(string url)
-{
-    try
-    {
-        using (var httpClient = new HttpClient())
-        {
-            var response = await httpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, url));
-            return response.IsSuccessStatusCode && response.StatusCode != System.Net.HttpStatusCode.Forbidden;
-        }
-    }
-    catch
-    {
-        return false;
-    }
-}

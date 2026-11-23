@@ -7,6 +7,16 @@ GET http://<host>:497/bestAudio?v=<videoId>
 -> { "url": "https://..." }
 ```
 
+The URL is always a direct audio file: when yt-dlp fails, or YouTube offers only an HLS (m3u8) playlist, the response is `502`. `v` must be an 11-character YouTube video ID, otherwise the response is `400`.
+
+## yt-dlp
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `YtDlp:Path` | `yt-dlp` | A bare name is looked up on `PATH`, as a shell does. A path containing `/` is used as given, e.g. `/usr/local/bin/yt-dlp` |
+
+No other locations are searched (not the working directory or the binary's directory). The resolved path and version are logged at startup (`Using yt-dlp <path> (<version>)`). Install yt-dlp where executables normally live (e.g. `/usr/local/bin`) and keep a single copy.
+
 ## Prerequisites
 
 Build machine:
@@ -14,7 +24,7 @@ Build machine:
 
 Server:
 - No .NET installation required (the binary is self-contained)
-- `yt-dlp` on `PATH`
+- `yt-dlp` on `PATH`, or its location set in `YtDlp:Path`
 
 ## Build
 
