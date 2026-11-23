@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Publish ytp as a self-contained single-file binary.
+#
+# Usage: scripts/publish [RID] [VERSION]
+#   RID      runtime identifier (default: linux-x64)
+#   VERSION  assembly/informational version (default: 0.0.0-local)
+#
+# Output: artifacts/<RID>/ytp (+ appsettings.json)
+# Used both locally and by .github/workflows/*.yml so builds are identical.
+set -euo pipefail
+
+RID="${1:-linux-x64}"
+VERSION="${2:-0.0.0-local}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT="$ROOT/artifacts/$RID"
+
+rm -rf "$OUT"
+
+dotnet publish "$ROOT/ytp/ytp.csproj" \
+  -c Release \
+  -r "$RID" \
+  --self-contained true \
+  -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:DebugType=None \
+  -p:DebugSymbols=false \
+  -p:Version="$VERSION" \
+  -o "$OUT"
+
+# Development-only files have no place on a server.
+rm -f "$OUT/appsettings.Development.json" "$OUT/web.config" "$OUT"/*.staticwebassets.*.json
+
+echo "Published $RID ($VERSION) -> $OUT"

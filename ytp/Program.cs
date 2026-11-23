@@ -2,7 +2,12 @@ using System.Diagnostics;
 using System.Collections.Concurrent;
 
 var cache = new ConcurrentDictionary<string, string>();
-var builder = WebApplication.CreateBuilder(args);
+// Resolve appsettings.json next to the binary, not the caller's working directory.
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = AppContext.BaseDirectory
+});
 
 var app = builder.Build();
 var logger = app.Services.GetRequiredService<ILogger<Program>>();

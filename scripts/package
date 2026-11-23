@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Package published binaries into release assets with stable names.
+#
+# Usage: scripts/package VERSION RID [RID...]
+# Expects artifacts/<RID>/ (from scripts/publish). Produces in dist/:
+#   ytp-<RID>.tar.gz   stable name, so hosts can always fetch "latest"
+#   SHA256SUMS         checksums for every tarball
+set -euo pipefail
+
+VERSION="$1"; shift
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DIST="$ROOT/dist"
+
+rm -rf "$DIST"
+mkdir -p "$DIST"
+
+for rid in "$@"; do
+  echo "$VERSION" > "$ROOT/artifacts/$rid/VERSION"
+  tar -C "$ROOT/artifacts/$rid" -czf "$DIST/ytp-$rid.tar.gz" .
+done
+
+(cd "$DIST" && sha256sum ytp-*.tar.gz > SHA256SUMS)
+ls -l "$DIST"
