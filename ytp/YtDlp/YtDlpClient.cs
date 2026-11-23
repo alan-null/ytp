@@ -47,17 +47,41 @@ public sealed class YtDlpClient(IConfiguration configuration, ILogger<YtDlpClien
     }
 
     private static readonly TimeSpan UrlTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(15);
 
     // When YouTube forces SABR streaming, only HLS (m3u8) audio is left and plain "bestaudio" picks it.
     // URLs handed to clients must be direct media files: an m3u8 playlist looks like a valid URL but
     // plain-file players cannot play it. So URL lookups fail instead of falling back.
     private const string DirectAudioFormat = "bestaudio[protocol^=http]";
 
+    // Downloads may fall back to HLS: yt-dlp fetches the segments, so the cached file is still audio.
+    private const string DownloadAudioFormat = "bestaudio[protocol^=http]/bestaudio";
+
     public async Task<string> GetBestAudioUrlAsync(string videoId, CancellationToken ct = default)
     {
         var output = await RunAsync(["--get-url", "-f", DirectAudioFormat, "--no-playlist", "--", VideoId.ToWatchUrl(videoId)],
             UrlTimeout, ct);
         return LastLine(output) ?? throw new YtDlpException($"yt-dlp returned no URL for {videoId}.");
+    }
+
+    /// <summary>Downloads best audio into <paramref name="directory"/> and returns the file path.</summary>
+    public async Task<string> DownloadBestAudioAsync(string videoId, string directory, CancellationToken ct = default)
+    {
+        var output = await RunAsync(
+            [
+                "-f", DownloadAudioFormat, "--no-playlist", "--no-progress",
+                "--no-simulate", "--print", "after_move:filepath",
+                "-o", Path.Combine(directory, "%(id)s.%(ext)s"),
+                "--", VideoId.ToWatchUrl(videoId)
+            ],
+            DownloadTimeout, ct);
+
+        var path = LastLine(output);
+        if (path is null || !File.Exists(path))
+        {
+            throw new YtDlpException($"yt-dlp did not produce a file for {videoId}.");
+        }
+        return path;
     }
 
     private async Task<string> RunAsync(IReadOnlyList<string> args, TimeSpan timeout, CancellationToken ct)
