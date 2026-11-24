@@ -4,29 +4,76 @@
 
 ```
 GET http://<host>:497/bestAudio?v=<videoId>
+X-Api-Key: <key>
 -> { "url": "https://..." }
 ```
 
-- **Cached:** the URL points at `ytp`'s own `/audio/<videoId>`.
+- **Cached:** the URL points at `ytp`'s own `/audio/<videoId>?exp=...&sig=...`, a signed link that works without the key (see [Access control](#access-control)). With the [S3 backend](#backblaze-b2-s3-compatible-backend) it is a presigned bucket URL instead.
 - **Not cached:** the URL is a direct googlevideo URL (kept in memory while it stays valid), the same as a plain proxy. When yt-dlp fails, or YouTube offers only an HLS (m3u8) playlist and no direct audio file, the response is `502`, never a URL.
 
 Audio is cached only on demand, through `POST /prefetch`. Setting `Cache:DownloadOnMiss` to `true` also queues a background download after each miss.
 
 ## Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/bestAudio?v=<id>` | Playable URL as `{ "url": ... }` |
-| `GET`, `HEAD` | `/audio/<id>` | Cached audio; supports HTTP `Range` (seeking). `404` when not cached |
-| `POST` | `/prefetch` | JSON array of IDs to download in the background (max 500). Returns `202` with the IDs grouped as `queued`, `alreadyQueued`, `cached`, `invalid`, `queueFull` |
-| `GET` | `/cache` | Cache entries, total size and pending download count |
-| `DELETE` | `/cache/<id>` | Remove an entry (`204`, or `404` when missing) |
+| Method | Path | Access | Description |
+|---|---|---|---|
+| `GET` | `/bestAudio?v=<id>` | key | Playable URL as `{ "url": ... }`. `503` when all yt-dlp lookup slots stay busy |
+| `GET`, `HEAD` | `/audio/<id>` | key or signed link | Cached audio; supports HTTP `Range` (seeking). `404` when not cached |
+| `POST` | `/prefetch` | key | JSON array of IDs to download in the background (max 500). Returns `202` with the IDs grouped as `queued`, `alreadyQueued`, `cached`, `invalid`, `queueFull` |
+| `GET` | `/cache` | admin key | Cache entries, total size and pending download count |
+| `DELETE` | `/cache/<id>` | admin key | Remove an entry (`204`, or `404` when missing) |
 
 IDs must be 11-character YouTube video IDs (`[A-Za-z0-9_-]`).
 
 ```bash
-curl -H 'Content-Type: application/json' -d '["dQw4w9WgXcQ"]' http://localhost:497/prefetch
+curl -H "X-Api-Key: $YTP_KEY" -H 'Content-Type: application/json' -d '["dQw4w9WgXcQ"]' http://localhost:497/prefetch
 ```
+
+## Access control
+
+Every request needs an API key in the `X-Api-Key` header, unknown paths included. A missing or wrong key gets `401`; a regular key on an admin endpoint gets `403`. `ytp` refuses to start without at least one key, and rejects keys shorter than 32 characters.
+
+The `/audio` links returned by `/bestAudio` carry an HMAC signature and an expiry instead, because media players usually cannot send headers. A link is valid for that one video ID only, and the key never appears in a URL.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `Auth:Keys` | none | Keys for `/bestAudio`, `/prefetch` and `/audio` |
+| `Auth:AdminKeys` | none | Keys that can also use `/cache`. Optional; without one, `/cache` is closed |
+| `Auth:SigningKey` | random per start | Secret for `/audio` links (32+ characters). Set it so links survive a restart |
+| `Auth:AudioLinkLifetime` | `06:00:00` | How long an `/audio` link stays valid |
+
+Keep keys out of `appsettings.json`; set them from the environment (one variable per key):
+
+```bash
+openssl rand -base64 32
+```
+
+```bash
+export Auth__Keys__0='<key>' Auth__AdminKeys__0='<admin key>' Auth__SigningKey='<secret>'
+```
+
+`appsettings.Development.json` has fixed, non-secret keys for local runs.
+
+### Rate limits
+
+Over the limit, the response is `429` with `Retry-After`.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `RateLimit:PerIpPerMinute` | `300` | All requests from one client IP, including ones with a wrong key |
+| `RateLimit:LookupsPerMinute` | `30` | `/bestAudio` calls per key |
+| `RateLimit:PrefetchesPerMinute` | `5` | `/prefetch` calls per key |
+| `YtDlp:MaxConcurrentLookups` | `4` | yt-dlp URL lookups running at once across all clients; a request that waits more than 10 s for a slot gets `503` |
+
+Request bodies are limited to 64 KiB.
+
+With the [S3 backend](#backblaze-b2-s3-compatible-backend), the key check runs before any bucket call, so requests without a key cost no API calls. Key holders still can: each `/bestAudio` hit and each ID in `/prefetch` is one `HEAD` (class B), and so is each `/audio` request with `PresignedUrls=false`. The default limits allow far more than B2's 2,500 free class B calls a day, so lower `LookupsPerMinute` and `PrefetchesPerMinute` if a key is shared widely.
+
+### TLS and reverse proxy
+
+`ytp` speaks plain HTTP, so anyone on the network path can read a key. Outside a trusted LAN, put it behind a TLS reverse proxy (e.g. Caddy: `ytp.example.com { reverse_proxy 127.0.0.1:497 }`), firewall port 497, and set `Cache:PublicBaseUrl` to the public `https://` address.
+
+The client IP (for per-IP limits) and scheme are taken from `X-Forwarded-For` / `X-Forwarded-Proto` only when the request comes from loopback or an address in `Proxy:KnownProxies`, e.g. `Proxy__KnownProxies__0=172.17.0.1` for a proxy in Docker. With a proxy anywhere else and that setting missing, all clients share the proxy's IP and its per-IP budget.
 
 ## yt-dlp
 
@@ -191,5 +238,5 @@ sudo setcap 'cap_net_bind_service=+ep' ytp/ytp
 ```
 
 ```bash
-./ytp/ytp
+Auth__Keys__0='<key>' ./ytp/ytp
 ```

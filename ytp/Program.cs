@@ -1,5 +1,8 @@
+using System.Net;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Options;
 using Ytp;
+using Ytp.Auth;
 using Ytp.Cache;
 using Ytp.Download;
 using Ytp.YtDlp;
@@ -9,6 +12,27 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
     Args = args,
     ContentRootPath = AppContext.BaseDirectory
+});
+
+// Request bodies are at most a /prefetch list of 500 IDs; refuse anything far larger.
+builder.WebHost.ConfigureKestrel(kestrel => kestrel.Limits.MaxRequestBodySize = 64 * 1024);
+
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));
+builder.Services.AddSingleton<ApiKeys>();
+builder.Services.AddSingleton<AudioLinkSigner>();
+builder.Services.AddYtpRateLimits(builder.Configuration);
+
+// Behind a reverse proxy, take the client IP and scheme from X-Forwarded-* headers, but only when the
+// request comes from a trusted proxy (loopback by default, plus Proxy:KnownProxies). Otherwise a client
+// could fake its IP and escape per-IP rate limits.
+builder.Services.Configure<ForwardedHeadersOptions>(forwarded =>
+{
+    forwarded.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    foreach (var proxy in builder.Configuration.GetSection("Proxy:KnownProxies").Get<string[]>() ?? [])
+    {
+        forwarded.KnownProxies.Add(IPAddress.Parse(proxy));
+    }
 });
 
 builder.Services.AddHttpClient();
@@ -35,6 +59,15 @@ var logger = app.Services.GetRequiredService<ILogger<Program>>();
 // Lifetime of direct (presigned) cache URLs; comparable to how long googlevideo URLs stay valid.
 var directUrlLifetime = TimeSpan.FromHours(6);
 
+// Fail at startup, not on the first request, when keys are missing or too weak.
+app.Services.GetRequiredService<ApiKeys>();
+app.Services.GetRequiredService<AudioLinkSigner>();
+
+app.UseForwardedHeaders();
+app.UseRouting();
+app.UseRateLimiter(); // before the key check, so failed key attempts are rate limited too
+app.UseApiKeys();
+
 // Log which yt-dlp binary and version are used.
 app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
 {
@@ -55,7 +88,7 @@ app.Urls.Add("http://*:497");
 // A failed lookup is an error response, never a URL. Caching happens through /prefetch
 // (or, only when DownloadOnMiss is enabled, in the background after a miss).
 app.MapGet("/bestAudio", async (string? v, HttpRequest request, IStreamCache cache, StreamUrlResolver resolver,
-    DownloadQueue queue, IOptions<CacheOptions> options, CancellationToken ct) =>
+    DownloadQueue queue, IOptions<CacheOptions> options, AudioLinkSigner signer, CancellationToken ct) =>
 {
     if (!VideoId.IsValid(v))
     {
@@ -67,7 +100,7 @@ app.MapGet("/bestAudio", async (string? v, HttpRequest request, IStreamCache cac
     if (await cache.GetInfoAsync(v!, ct) is not null)
     {
         var direct = await cache.GetDirectUrlAsync(v!, directUrlLifetime, ct);
-        return Results.Json(new { url = direct?.ToString() ?? AudioUrl(request, options.Value, v!) });
+        return Results.Json(new { url = direct?.ToString() ?? AudioUrl(request, options.Value, signer, v!) });
     }
 
     string url;
@@ -79,13 +112,18 @@ app.MapGet("/bestAudio", async (string? v, HttpRequest request, IStreamCache cac
     {
         return Results.Problem(e.Message, statusCode: StatusCodes.Status502BadGateway);
     }
+    catch (LookupBusyException e)
+    {
+        request.HttpContext.Response.Headers.RetryAfter = "5";
+        return Results.Problem(e.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
 
     if (options.Value.DownloadOnMiss)
     {
         queue.TryEnqueue(v!);
     }
     return Results.Json(new { url });
-});
+}).RequireRateLimiting(RateLimits.Lookup);
 
 // Streams cached audio with HTTP range support (seeking), or redirects to the store's direct URL.
 app.MapMethods("/audio/{v}", ["GET", "HEAD"], async (string v, IStreamCache cache, CancellationToken ct) =>
@@ -107,7 +145,7 @@ app.MapMethods("/audio/{v}", ["GET", "HEAD"], async (string v, IStreamCache cach
         ? Results.NotFound()
         : Results.Stream(cached.Content, cached.Entry.ContentType,
             lastModified: cached.Entry.CreatedAt, enableRangeProcessing: true);
-});
+}).AllowSignedAudioLink();
 
 // Queues video IDs for download. Body: ["id1", "id2", ...]
 app.MapPost("/prefetch", async (string[] ids, IStreamCache cache, DownloadQueue queue, CancellationToken ct) =>
@@ -135,7 +173,7 @@ app.MapPost("/prefetch", async (string[] ids, IStreamCache cache, DownloadQueue 
         result[bucket].Add(id);
     }
     return Results.Json(result, statusCode: StatusCodes.Status202Accepted);
-});
+}).RequireRateLimiting(RateLimits.Prefetch);
 
 app.MapGet("/cache", async (IStreamCache cache, DownloadQueue queue, CancellationToken ct) =>
 {
@@ -151,19 +189,20 @@ app.MapGet("/cache", async (IStreamCache cache, DownloadQueue queue, Cancellatio
         pendingDownloads = queue.PendingCount,
         entries = entries.OrderByDescending(e => e.LastAccessedAt)
     });
-});
+}).RequireAdmin();
 
 app.MapDelete("/cache/{v}", async (string v, IStreamCache cache, CancellationToken ct) =>
     !VideoId.IsValid(v) ? Results.BadRequest("Invalid video ID.")
     : await cache.DeleteAsync(v, ct) ? Results.NoContent()
-    : Results.NotFound());
+    : Results.NotFound()).RequireAdmin();
 
 app.Run();
 
-static string AudioUrl(HttpRequest request, CacheOptions options, string videoId)
+// Signed, so a media player can fetch it without the API key.
+static string AudioUrl(HttpRequest request, CacheOptions options, AudioLinkSigner signer, string videoId)
 {
     var baseUrl = string.IsNullOrWhiteSpace(options.PublicBaseUrl)
         ? $"{request.Scheme}://{request.Host}"
         : options.PublicBaseUrl.TrimEnd('/');
-    return $"{baseUrl}/audio/{videoId}";
+    return $"{baseUrl}/audio/{videoId}?{signer.Sign(videoId)}";
 }
