@@ -104,7 +104,7 @@ B2 free-tier limits:
 ## Prerequisites
 
 Build machine:
-- .NET 8 SDK (or newer; the project targets `net8.0`)
+- .NET 10 SDK (or newer; the project targets `net10.0`)
 
 Server:
 - No .NET installation required (the binary is self-contained)

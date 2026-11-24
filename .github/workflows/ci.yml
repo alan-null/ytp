@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
         run: dotnet restore ytp.sln
@@ -47,7 +47,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Publish
         run: scripts/publish linux-x64 "0.0.0-ci.${{ github.run_number }}+${GITHUB_SHA::7}"
