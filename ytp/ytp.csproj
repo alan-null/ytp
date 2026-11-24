@@ -7,6 +7,13 @@
     <RootNamespace>Ytp</RootNamespace>
     <AssemblyName>ytp</AssemblyName>
     <Version>1.0.0</Version>
+    <!-- AWSSDK.Core 4.1 requires System.IO.Hashing 11, which warns on net8.0 (it ships netstandard2.0 and works).
+         Remove after moving to net10.0. -->
+    <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.1.2" />
+  </ItemGroup>
 
 </Project>

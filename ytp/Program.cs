@@ -15,7 +15,15 @@ builder.Services.AddHttpClient();
 builder.Services.Configure<CacheOptions>(builder.Configuration.GetSection(CacheOptions.Section));
 builder.Services.AddSingleton<YtDlpClient>();
 builder.Services.AddSingleton<StreamUrlResolver>();
-builder.Services.AddSingleton<IStreamCache, FileSystemStreamCache>();
+var cacheBackend = builder.Configuration.GetSection(CacheOptions.Section).Get<CacheOptions>()?.Backend ?? CacheBackend.FileSystem;
+if (cacheBackend == CacheBackend.S3)
+{
+    builder.Services.AddSingleton<IStreamCache, S3StreamCache>();
+}
+else
+{
+    builder.Services.AddSingleton<IStreamCache, FileSystemStreamCache>();
+}
 builder.Services.AddSingleton<ICacheEvictionPolicy, IdleAndSizeEvictionPolicy>();
 builder.Services.AddSingleton<DownloadQueue>();
 builder.Services.AddHostedService<DownloadWorker>();
@@ -23,6 +31,9 @@ builder.Services.AddHostedService<CacheJanitor>();
 
 var app = builder.Build();
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
+
+// Lifetime of direct (presigned) cache URLs; comparable to how long googlevideo URLs stay valid.
+var directUrlLifetime = TimeSpan.FromHours(6);
 
 // Log which yt-dlp binary and version are used.
 app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(async () =>
@@ -55,7 +66,7 @@ app.MapGet("/bestAudio", async (string? v, HttpRequest request, IStreamCache cac
 
     if (await cache.GetInfoAsync(v!, ct) is not null)
     {
-        var direct = await cache.GetDirectUrlAsync(v!, TimeSpan.FromHours(1), ct);
+        var direct = await cache.GetDirectUrlAsync(v!, directUrlLifetime, ct);
         return Results.Json(new { url = direct?.ToString() ?? AudioUrl(request, options.Value, v!) });
     }
 
@@ -76,12 +87,20 @@ app.MapGet("/bestAudio", async (string? v, HttpRequest request, IStreamCache cac
     return Results.Json(new { url });
 });
 
-// Streams cached audio with HTTP range support (seeking).
+// Streams cached audio with HTTP range support (seeking), or redirects to the store's direct URL.
 app.MapMethods("/audio/{v}", ["GET", "HEAD"], async (string v, IStreamCache cache, CancellationToken ct) =>
 {
     if (!VideoId.IsValid(v))
     {
         return Results.BadRequest("Invalid video ID.");
+    }
+    if (await cache.GetInfoAsync(v, ct) is null)
+    {
+        return Results.NotFound();
+    }
+    if (await cache.GetDirectUrlAsync(v, directUrlLifetime, ct) is { } direct)
+    {
+        return Results.Redirect(direct.ToString());
     }
     var cached = await cache.OpenReadAsync(v, ct);
     return cached is null

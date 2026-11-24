@@ -11,7 +11,7 @@ public sealed record CacheEntry(
 public sealed record CachedStream(Stream Content, CacheEntry Entry);
 
 /// <summary>
-/// Byte store for cached media. Implementations: local file system now; S3-compatible (R2, B2) later.
+/// Byte store for cached media. Implementations: local file system and S3-compatible buckets (B2, R2, MinIO).
 /// Keys are opaque, URL-safe strings (<c>[A-Za-z0-9_-]</c>, 1-128 chars).
 /// </summary>
 public interface IStreamCache

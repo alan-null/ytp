@@ -42,6 +42,7 @@ The cache is stored on local disk as `<id>.data` plus an `<id>.json` metadata si
 
 | Setting | Default | Meaning |
 |---|---|---|
+| `Backend` | `FileSystem` | `FileSystem` (local disk) or `S3` (Backblaze B2 or another S3-compatible bucket, see below) |
 | `Directory` | `cache` | Cache directory. Services should set an absolute path, e.g. `/var/cache/ytp`; a relative path resolves against the working directory |
 | `MaxBytes` | 5 GiB | Size the janitor trims down to |
 | `MaxIdle` | `30.00:00:00` | Entries not read for this long are evicted |
@@ -51,7 +52,54 @@ The cache is stored on local disk as `<id>.data` plus an `<id>.json` metadata si
 | `QueueCapacity` | `1000` | Pending downloads accepted before `/prefetch` reports `queueFull` |
 | `PublicBaseUrl` | derived from request | Base URL for `/audio` links, e.g. behind a reverse proxy |
 
-Storage sits behind `IStreamCache` (`ytp/Cache/IStreamCache.cs`), so a remote backend such as Cloudflare R2 or Backblaze B2 can be added later. Its `GetDirectUrlAsync` would return presigned URLs, letting clients fetch from the bucket directly.
+Storage sits behind `IStreamCache` (`ytp/Cache/IStreamCache.cs`), with two implementations: `FileSystemStreamCache` and `S3StreamCache`.
+
+### Backblaze B2 (S3-compatible) backend
+
+With `Cache:Backend` set to `S3`, entries live in a bucket instead of on disk. It uses B2's S3-compatible API, so Cloudflare R2 and MinIO work too. `MaxBytes`, `MaxIdle` and the janitor behave the same as on disk.
+
+- **Objects:** `<Prefix>media/<id>` holds the audio, with its `Content-Type`. `<Prefix>access/<id>` is an empty marker whose timestamp is the last access, because object stores don't track reads.
+- **Hits:** `/bestAudio` returns a presigned bucket URL valid for 6 hours, so the audio never passes through ytp. `/audio/<id>` redirects to the same URL. With `PresignedUrls=false`, ytp streams the object itself, and range requests are passed through to the bucket.
+
+B2 setup:
+
+1. Create a **private** bucket. Under *Lifecycle Settings* choose **Keep only the last version of the file**. B2 keeps every version by default, so without this, deleted or evicted entries and rewritten access markers keep using storage.
+2. Create an application key restricted to that bucket with read and write access. Its *keyID* is the access key and its *applicationKey* is the secret.
+3. Take the endpoint from the bucket details, e.g. `s3.eu-central-003.backblazeb2.com`. The middle part, `eu-central-003`, is the region.
+4. Configure ytp. Put the secrets in the environment, e.g. a systemd `EnvironmentFile=` readable only by the service:
+
+```ini
+Cache__Backend=S3
+Cache__S3__ServiceUrl=https://s3.eu-central-003.backblazeb2.com
+Cache__S3__Region=eu-central-003
+Cache__S3__Bucket=my-ytp-cache
+Cache__S3__AccessKeyId=<keyID>
+Cache__S3__SecretAccessKey=<applicationKey>
+# 9 GiB, under the 10 GB free tier
+Cache__MaxBytes=9663676416
+Cache__CleanupInterval=01:00:00
+```
+
+| `Cache:S3` setting | Default | Meaning |
+|---|---|---|
+| `ServiceUrl` | – | S3 endpoint, e.g. `https://s3.eu-central-003.backblazeb2.com` |
+| `Region` | `us-east-1` | Signing region; for B2 the middle part of the endpoint |
+| `Bucket` | – | Bucket name |
+| `AccessKeyId`, `SecretAccessKey` | – | Credentials; set them from the environment, not `appsettings.json` |
+| `Prefix` | empty | Prefix for all objects, e.g. `ytp/`, so the bucket can be shared |
+| `PresignedUrls` | `true` | Give clients presigned bucket URLs; `false` streams through ytp |
+| `AccessUpdateInterval` | `01:00:00` | Rewrite an entry's access marker at most this often |
+| `ForcePathStyle` | `false` | Bucket in the URL path; needed for MinIO |
+
+B2 free-tier limits:
+
+- Storage: 10 GB.
+- Download traffic: free up to 3× the stored amount per month.
+- Daily free API calls: 2,500 class B (`HEAD`/`GET`) and 2,500 class C (list). Uploads and deletes are free.
+- What ytp uses:
+  - Each janitor run lists the bucket, which costs class C calls, hence the hourly `CleanupInterval` above.
+  - Each `/bestAudio` hit costs one `HEAD` (class B).
+  - After a restart, each entry costs one extra `HEAD` the first time it's listed.
 
 ## Prerequisites
 
